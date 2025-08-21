@@ -48,7 +48,7 @@ const createRoom = async () => {
       RoomId.value = uuidV4();
     }
     context.room = await SkyWayRoom.FindOrCreate(context.ctx, {
-      type: 'p2p',
+      type: 'sfu',
       name: RoomId.value
     });
     RoomCreated.value = true;
