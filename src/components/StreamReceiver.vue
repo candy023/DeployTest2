@@ -57,7 +57,33 @@ const createRoom = async () => {
     console.error(e);
   }
 };
-
+// 受信ストリームをDOMへattach（映像/音声対応）
+const attachRemoteStream = (stream) => {
+  try {
+    if (stream?.track?.kind === 'video') {
+      const el = document.createElement('video');
+      el.autoplay = true;
+      el.playsInline = true;
+      el.className = 'w-64 h-48 object-cover rounded border';
+      StreamArea.value.appendChild(el);
+      stream.attach(el);
+      // autoplayポリシー対策
+      el.play?.().catch(() => {});
+      RemoteVideos.value.push(el);
+    } else if (stream?.track?.kind === 'audio') {
+      const el = document.createElement('audio');
+      el.autoplay = true;
+      el.controls = false;
+      el.style.display = 'none';
+      StreamArea.value.appendChild(el);
+      stream.attach(el);
+      el.play?.().catch(() => {});
+      RemoteVideos.value.push(el);
+    }
+  } catch (err) {
+    console.error('attachRemoteStream failed:', err);
+  }
+};
 // ルーム参加
 const joinRoom = async () => {
   if (Joining.value || Joined.value) return;
@@ -79,9 +105,12 @@ const joinRoom = async () => {
 
     // ローカルカメラ映像 (音声含めたければ別メソッドも可)
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
-
+ // ローカルの映像・音声ストリームを作成して publish（重要）
+    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream();
     // 映像を publish
     await member.publish(videoStream);
+    // 音声を publish (必要なら)
+    await member.publish(audioStream);
 
     // ローカル video 要素
     const localVideoEl = document.createElement('video');
@@ -90,23 +119,36 @@ const joinRoom = async () => {
     localVideoEl.autoplay = true;
     localVideoEl.className = 'w-64 h-48 object-cover rounded border';
     StreamArea.value.appendChild(localVideoEl);
-
     // SkyWay の stream を video に接続
     videoStream.attach(localVideoEl);
 
-    // Remote 受信ハンドラ
-    member.onPublicationSubscribed.add(({ stream }) => {
-      // リモートストリームが映像か判定
-      if (stream.track && stream.track.kind === 'video') {
-        const remoteVideo = document.createElement('video');
-        remoteVideo.autoplay = true;
-        remoteVideo.playsInline = true;
-        remoteVideo.className = 'w-64 h-48 object-cover rounded border';
-        StreamArea.value.appendChild(remoteVideo);
-        stream.attach(remoteVideo);
-        RemoteVideos.value.push(remoteVideo);
+
+      // 既存の公開中ストリームにsubscribe（重要）
+    for (const pub of context.room.publications ?? []) {
+      if (pub.publisher.id === member.id) continue;
+      try {
+        const { stream } = await member.subscribe(pub.id);
+        attachRemoteStream(stream);
+      } catch (err) {
+        console.warn('subscribe existing pub failed:', err);
+      }
+    }
+
+    // 以後新規公開にもsubscribe（重要）
+    context.room.onStreamPublished.add(async (e) => {
+      if (e.publication.publisher.id === member.id) return;
+      try {
+        const { stream } = await member.subscribe(e.publication.id);
+        attachRemoteStream(stream);
+      } catch (err) {
+        console.warn('subscribe new pub failed:', err);
       }
     });
+
+    // 参考: すでに用意済みのイベントハンドラを拡張したい場合はこれでもOK
+    // member.onPublicationSubscribed.add(({ stream }) => {
+    //   attachRemoteStream(stream);
+    // });
 
     Joined.value = true;
   } catch (e) {
@@ -116,6 +158,7 @@ const joinRoom = async () => {
     Joining.value = false;
   }
 };
+
 
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
