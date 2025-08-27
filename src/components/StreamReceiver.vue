@@ -159,7 +159,59 @@ const joinRoom = async () => {
   }
 };
 
+// 退出（Leave）
+const leaveRoom = async () => {
+  try {
+    // ルーム離脱
+    if (LocalMember.value) {
+      await LocalMember.value.leave?.();
+    }
 
+    // ローカルメディアの解放
+    if (LocalVideoStream.value) {
+      try {
+        LocalVideoStream.value.detach?.();
+        LocalVideoStream.value.track?.stop?.();
+      } catch {}
+    }
+    if (LocalAudioStream.value) {
+      try {
+        LocalAudioStream.value.detach?.();
+        LocalAudioStream.value.track?.stop?.();
+      } catch {}
+    }
+
+    // ローカル要素の削除
+    if (LocalVideoEl.value && LocalVideoEl.value.parentNode) {
+      LocalVideoEl.value.pause?.();
+      LocalVideoEl.value.srcObject = null;
+      LocalVideoEl.value.parentNode.removeChild(LocalVideoEl.value);
+    }
+    LocalVideoEl.value = null;
+
+    // リモート要素の削除
+    for (const el of RemoteMediaEls.value) {
+      try {
+        el.pause?.();
+        el.srcObject = null;
+        el.remove();
+      } catch {}
+    }
+    RemoteMediaEls.value = [];
+
+    // 状態初期化（RoomIdは残す＝再参加しやすくする）
+    Joined.value = false;
+    Joining.value = false;
+    LocalMember.value = null;
+    LocalVideoStream.value = null;
+    LocalAudioStream.value = null;
+
+    // ルーム自体は保持（再Joinを容易に）。完全に閉じたいなら:
+    // RoomCreated.value = false; context.room = null;
+  } catch (e) {
+    console.error('leave failed:', e);
+  }
+};
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
   await getContext();
@@ -192,6 +244,14 @@ onMounted(async () => {
           class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
         >
           {{ Joining ? 'Joining...' : 'Join Room' }}
+        </button>
+
+         <button
+          v-if="Joined"
+          @click="leaveRoom"
+          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400"
+        >
+          Leave Room
         </button>
       </div>
 
