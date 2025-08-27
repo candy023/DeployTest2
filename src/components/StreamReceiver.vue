@@ -31,10 +31,14 @@ const LocalVideoEl = ref(null);
 // 退出中フラグ（追加：leave 完了前の再 join を防止）
 const Leaving = ref(false);
 
-// 購読済みpublicationのID集合（重複subscribe防止） // 追加
-const subscribedPubIds = new Set();
+// 購読済みpublicationのID管理（追加：二重subscribe防止）
+const SubscribedPubIds = new Set();
 
-// 追加されたイベントハンドラの参照（remove用） // 追加
+// publishの戻り値（publication）を保持（追加：leave時にunpublishするため）
+const LocalVideoPub = ref(null);
+const LocalAudioPub = ref(null);
+
+// onStreamPublishedのハンドラ参照を保持（追加：leave時にremoveするため）
 let onStreamPublishedHandler = null;
 
 const baseUrl = window.location.href.split('?')[0];
@@ -71,6 +75,7 @@ const createRoom = async () => {
     console.error(e);
   }
 };
+
 // 受信ストリームをDOMへattach（映像/音声対応）
 const attachRemoteStream = (stream) => {
   try {
@@ -98,6 +103,38 @@ const attachRemoteStream = (stream) => {
     console.error('attachRemoteStream failed:', err);
   }
 };
+
+// 自分起点のpublicationかを判定（追加）
+const isMyOriginPublication = (pub, me) => {
+  try {
+    if (!pub) return false;
+    // 直接のpublisherが自分
+    if (pub.publisher?.id === me.id) return true;
+    // SFU転送元（origin）のpublisherが自分
+    const originPublisherId =
+      pub.origin?.publisher?.id ??
+      pub.originPublisher?.id ?? // SDKバージョン差異対策
+      null;
+    return originPublisherId === me.id;
+  } catch {
+    return false;
+  }
+};
+
+// publicationを安全にsubscribe（追加：重複購読/自分起点の購読を抑止）
+const safeSubscribe = async (pub, me) => {
+  try {
+    if (!pub) return;
+    if (isMyOriginPublication(pub, me)) return; // 自分起点は購読しない
+    if (SubscribedPubIds.has(pub.id)) return;    // すでに購読済みはスキップ
+    const { stream } = await me.subscribe(pub.id);
+    SubscribedPubIds.add(pub.id);
+    attachRemoteStream(stream);
+  } catch (err) {
+    console.warn('subscribe failed:', err);
+  }
+};
+
 // ルーム参加
 const joinRoom = async () => {
   if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
@@ -113,12 +150,6 @@ const joinRoom = async () => {
       await createRoom();
     }
 
-    // 既存のonStreamPublishedハンドラを外してから再設定（二重add防止） // 追加
-    if (onStreamPublishedHandler && context.room?.onStreamPublished) {
-      try { context.room.onStreamPublished.remove(onStreamPublishedHandler); } catch {}
-      onStreamPublishedHandler = null;
-    }
-
     // join
     const member = await context.room.join({ name: uuidV4() });
     LocalMember.value = member;
@@ -132,10 +163,9 @@ const joinRoom = async () => {
     LocalVideoStream.value = videoStream;
     LocalAudioStream.value = audioStream;
 
-    // 映像を publish
-    await member.publish(videoStream);
-    // 音声を publish (必要なら)
-    await member.publish(audioStream);
+    // 映像/音声を publish（戻り値を保持：unpublish用）
+    LocalVideoPub.value = await member.publish(videoStream);
+    LocalAudioPub.value = await member.publish(audioStream);
 
     // ローカル video 要素
     const localVideoEl = document.createElement('video');
@@ -151,33 +181,18 @@ const joinRoom = async () => {
 
     // 既存の公開中ストリームにsubscribe（重要）
     for (const pub of context.room.publications ?? []) {
-      // 自分自身のpublication／自分起点のSFU転送publicationは購読しない // 追加
-      if (pub.publisher?.id === member.id) continue;
-      if (pub.origin?.publisher?.id === member.id || pub.originPublisher?.id === member.id) continue;
-      if (subscribedPubIds.has(pub.id)) continue; // 二重購読防止（追加）
-      try {
-        const { stream } = await member.subscribe(pub.id);
-        subscribedPubIds.add(pub.id); // 追加
-        attachRemoteStream(stream);
-      } catch (err) {
-        console.warn('subscribe existing pub failed:', err);
-      }
+      await safeSubscribe(pub, member); // フィルタと二重防止を適用（追加）
+    }
+
+    // 既存のハンドラが残っていたら一旦remove（追加）
+    if (onStreamPublishedHandler && context.room) {
+      try { context.room.onStreamPublished.remove(onStreamPublishedHandler); } catch {}
+      onStreamPublishedHandler = null;
     }
 
     // 以後新規公開にもsubscribe（重要）
     onStreamPublishedHandler = async (e) => {
-      const pub = e.publication;
-      // 自分自身/自分起点の転送publicationは購読しない // 追加
-      if (pub.publisher?.id === member.id) return;
-      if (pub.origin?.publisher?.id === member.id || pub.originPublisher?.id === member.id) return;
-      if (subscribedPubIds.has(pub.id)) return; // 追加
-      try {
-        const { stream } = await member.subscribe(pub.id);
-        subscribedPubIds.add(pub.id); // 追加
-        attachRemoteStream(stream);
-      } catch (err) {
-        console.warn('subscribe new pub failed:', err);
-      }
+      await safeSubscribe(e.publication, member); // フィルタと二重防止を適用（追加）
     };
     context.room.onStreamPublished.add(onStreamPublishedHandler);
 
@@ -200,18 +215,19 @@ const leaveRoom = async () => {
   if (Leaving.value) return; // 二重押下防止（追加）
   Leaving.value = true;
   try {
-    // 購読済みIDをクリア（再入室時のダブり防止） // 追加
-    subscribedPubIds.clear();
-
-    // 退出前にonStreamPublishedハンドラを外す // 追加
-    if (onStreamPublishedHandler && context.room?.onStreamPublished) {
+    // ルームのイベントハンドラを解除（追加）
+    if (onStreamPublishedHandler && context.room) {
       try { context.room.onStreamPublished.remove(onStreamPublishedHandler); } catch {}
       onStreamPublishedHandler = null;
     }
 
-    // 自分の配信を明示的に unpublish（残留防止） // 追加
-    for (const pub of LocalMember.value?.publications ?? []) {
-      try { await LocalMember.value.unpublish(pub.id); } catch {}
+    // 自分のpublicationを明示的にunpublish（追加）
+    if (LocalMember.value) {
+      for (const pub of [LocalVideoPub.value, LocalAudioPub.value]) {
+        if (pub?.id) {
+          try { await LocalMember.value.unpublish(pub.id); } catch {}
+        }
+      }
     }
 
     // ルーム離脱（チャンネルに居るときのみ実行：ガード）
@@ -257,8 +273,11 @@ const leaveRoom = async () => {
     LocalMember.value = null;
     LocalVideoStream.value = null;
     LocalAudioStream.value = null;
+    LocalVideoPub.value = null; // （追加）
+    LocalAudioPub.value = null; // （追加）
+    SubscribedPubIds.clear();   // （追加）
 
-    // 重要: 同じ Room インスタンスでの再 join を避けるため破棄
+    // 重要: 同じ Room インスタンスでの再 join を避けるため破棄（追加）
     RoomCreated.value = false;
     context.room = null;
   } catch (e) {
@@ -267,6 +286,7 @@ const leaveRoom = async () => {
     Leaving.value = false;
   }
 };
+
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
   await getContext();
