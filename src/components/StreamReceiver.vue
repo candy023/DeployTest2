@@ -6,6 +6,7 @@ import GetToken from './SkywayToken.js';
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
 const secret = import.meta.env.VITE_SKYWAY_SECRET_KEY;
+
 // トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
 const tokenString = GetToken(appId, secret);
 
@@ -26,6 +27,9 @@ const RemoteVideos = ref([]); // 受信した remote streams 用
 const LocalVideoStream = ref(null);
 const LocalAudioStream = ref(null);
 const LocalVideoEl = ref(null);
+
+// 退出中フラグ（追加：leave 完了前の再 join を防止）
+const Leaving = ref(false);
 
 const baseUrl = window.location.href.split('?')[0];
 
@@ -61,7 +65,6 @@ const createRoom = async () => {
     console.error(e);
   }
 };
-
 // 受信ストリームをDOMへattach（映像/音声対応）
 const attachRemoteStream = (stream) => {
   try {
@@ -89,10 +92,9 @@ const attachRemoteStream = (stream) => {
     console.error('attachRemoteStream failed:', err);
   }
 };
-
 // ルーム参加
 const joinRoom = async () => {
-  if (Joining.value || Joined.value) return;
+  if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
   if (!RoomId.value) {
     alert('No Room ID');
     return;
@@ -101,7 +103,7 @@ const joinRoom = async () => {
     Joining.value = true;
 
     // まだルームが作成されていない場合は作る
-    if (!RoomCreated.value) {
+    if (!RoomCreated.value || !context.room) { // room を破棄するので null チェック追加
       await createRoom();
     }
 
@@ -130,12 +132,10 @@ const joinRoom = async () => {
     localVideoEl.autoplay = true;
     localVideoEl.className = 'w-64 h-48 object-cover rounded border';
     StreamArea.value.appendChild(localVideoEl);
-
-    // 退出時に解放するため保持（追加）
-    LocalVideoEl.value = localVideoEl;
-
     // SkyWay の stream を video に接続
     videoStream.attach(localVideoEl);
+    // 退出時に解放するため保持（追加）
+    LocalVideoEl.value = localVideoEl;
 
     // 既存の公開中ストリームにsubscribe（重要）
     for (const pub of context.room.publications ?? []) {
@@ -175,17 +175,12 @@ const joinRoom = async () => {
 
 // 退出（Leave）
 const leaveRoom = async () => {
+  if (Leaving.value) return; // 二重押下防止（追加）
+  Leaving.value = true;
   try {
-    // ルーム離脱（チャンネルに居るときのみ実行：ガードを追加）
-    if (LocalMember.value?.leave) {
-      try {
-        // SkyWay SDKの内部状態によっては未参加で例外が出るため channel 存在でガード
-        if (LocalMember.value.channel) {
-          await LocalMember.value.leave();
-        }
-      } catch (err) {
-        console.warn('leave skipped or failed:', err);
-      }
+    // ルーム離脱（チャンネルに居るときのみ実行：ガード）
+    if (LocalMember.value?.leave && LocalMember.value.channel) {
+      await LocalMember.value.leave();
     }
 
     // ローカルメディアの解放
@@ -210,11 +205,10 @@ const leaveRoom = async () => {
     }
     LocalVideoEl.value = null;
 
-    // リモート要素の削除（RemoteMediaEls ではなく RemoteVideos を使用）
+    // リモート要素の削除
     for (const el of RemoteVideos.value) {
       try {
         el.pause?.();
-        // skyway attach は srcObject を直接使わない場合もあるが、明示クリア
         el.srcObject = null;
         el.remove();
       } catch {}
@@ -228,13 +222,15 @@ const leaveRoom = async () => {
     LocalVideoStream.value = null;
     LocalAudioStream.value = null;
 
-    // ルーム自体は保持（再Joinを容易に）。完全に閉じたいなら:
-    // RoomCreated.value = false; context.room = null;
+    // 重要: 同じ Room インスタンスでの再 join を避けるため破棄（追加）
+    RoomCreated.value = false;
+    context.room = null;
   } catch (e) {
     console.error('leave failed:', e);
+  } finally {
+    Leaving.value = false;
   }
 };
-
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
   await getContext();
@@ -262,7 +258,7 @@ onMounted(async () => {
 
         <button
           v-if="RoomId && !Joined"
-          :disabled="Joining"
+          :disabled="Joining || Leaving"   
           @click="joinRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
         >
@@ -271,10 +267,11 @@ onMounted(async () => {
 
          <button
           v-if="Joined"
+          :disabled="Leaving"            
           @click="leaveRoom"
-          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400"
+          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
         >
-          Leave Room
+          {{ Leaving ? 'Leaving...' : 'Leave Room' }}
         </button>
       </div>
 
