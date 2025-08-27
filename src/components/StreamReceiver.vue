@@ -6,6 +6,7 @@ import GetToken from './SkywayToken.js';
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
 const secret = import.meta.env.VITE_SKYWAY_SECRET_KEY;
+
 // トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
 const tokenString = GetToken(appId, secret);
 
