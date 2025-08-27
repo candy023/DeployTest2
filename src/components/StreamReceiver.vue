@@ -23,6 +23,11 @@ const LocalMember = ref(null);
 const ErrorMessage = ref('');
 const RemoteVideos = ref([]); // 受信した remote streams 用
 
+// 退出時に解放するために保持（追加）
+const LocalVideoStream = ref(null);
+const LocalAudioStream = ref(null);
+const LocalVideoEl = ref(null);
+
 const baseUrl = window.location.href.split('?')[0];
 
 // SkyWay Context 作成
@@ -57,6 +62,7 @@ const createRoom = async () => {
     console.error(e);
   }
 };
+
 // 受信ストリームをDOMへattach（映像/音声対応）
 const attachRemoteStream = (stream) => {
   try {
@@ -84,6 +90,7 @@ const attachRemoteStream = (stream) => {
     console.error('attachRemoteStream failed:', err);
   }
 };
+
 // ルーム参加
 const joinRoom = async () => {
   if (Joining.value || Joined.value) return;
@@ -105,8 +112,13 @@ const joinRoom = async () => {
 
     // ローカルカメラ映像 (音声含めたければ別メソッドも可)
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
- // ローカルの映像・音声ストリームを作成して publish（重要）
+    // ローカルの映像・音声ストリームを作成して publish（重要）
     const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream();
+
+    // 退出時に解放するため保持（追加）
+    LocalVideoStream.value = videoStream;
+    LocalAudioStream.value = audioStream;
+
     // 映像を publish
     await member.publish(videoStream);
     // 音声を publish (必要なら)
@@ -119,11 +131,14 @@ const joinRoom = async () => {
     localVideoEl.autoplay = true;
     localVideoEl.className = 'w-64 h-48 object-cover rounded border';
     StreamArea.value.appendChild(localVideoEl);
+
+    // 退出時に解放するため保持（追加）
+    LocalVideoEl.value = localVideoEl;
+
     // SkyWay の stream を video に接続
     videoStream.attach(localVideoEl);
 
-
-      // 既存の公開中ストリームにsubscribe（重要）
+    // 既存の公開中ストリームにsubscribe（重要）
     for (const pub of context.room.publications ?? []) {
       if (pub.publisher.id === member.id) continue;
       try {
@@ -162,9 +177,16 @@ const joinRoom = async () => {
 // 退出（Leave）
 const leaveRoom = async () => {
   try {
-    // ルーム離脱
-    if (LocalMember.value) {
-      await LocalMember.value.leave?.();
+    // ルーム離脱（チャンネルに居るときのみ実行：ガードを追加）
+    if (LocalMember.value?.leave) {
+      try {
+        // SkyWay SDKの内部状態によっては未参加で例外が出るため channel 存在でガード
+        if (LocalMember.value.channel) {
+          await LocalMember.value.leave();
+        }
+      } catch (err) {
+        console.warn('leave skipped or failed:', err);
+      }
     }
 
     // ローカルメディアの解放
@@ -189,15 +211,16 @@ const leaveRoom = async () => {
     }
     LocalVideoEl.value = null;
 
-    // リモート要素の削除
-    for (const el of RemoteMediaEls.value) {
+    // リモート要素の削除（RemoteMediaEls ではなく RemoteVideos を使用）
+    for (const el of RemoteVideos.value) {
       try {
         el.pause?.();
+        // skyway attach は srcObject を直接使わない場合もあるが、明示クリア
         el.srcObject = null;
         el.remove();
       } catch {}
     }
-    RemoteMediaEls.value = [];
+    RemoteVideos.value = [];
 
     // 状態初期化（RoomIdは残す＝再参加しやすくする）
     Joined.value = false;
@@ -212,6 +235,7 @@ const leaveRoom = async () => {
     console.error('leave failed:', e);
   }
 };
+
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
   await getContext();
