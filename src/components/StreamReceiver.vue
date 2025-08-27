@@ -28,23 +28,6 @@ const LocalVideoStream = ref(null);
 const LocalAudioStream = ref(null);
 const LocalVideoEl = ref(null);
 
-// 退出中フラグ（追加：leave 完了前の再 join を防止）
-const Leaving = ref(false);
-
-// 購読済みpublicationのID管理（追加：二重subscribe防止）
-const SubscribedPubIds = new Set();
-
-// publishの戻り値（publication）を保持（追加：leave時にunpublishするため）
-const LocalVideoPub = ref(null);
-const LocalAudioPub = ref(null);
-
-// onStreamPublished / onStreamUnpublished のハンドラ参照を保持（追加：leave時にremoveするため）
-let onStreamPublishedHandler = null;
-let onStreamUnpublishedHandler = null;
-
-/* （追加） publication.id -> 要素 の対応を保持しておくと確実に掃除できる */
-const PubIdToElement = new Map();
-
 const baseUrl = window.location.href.split('?')[0];
 
 // SkyWay Context 作成
@@ -81,7 +64,7 @@ const createRoom = async () => {
 };
 
 // 受信ストリームをDOMへattach（映像/音声対応）
-const attachRemoteStream = (stream, pubId) => {
+const attachRemoteStream = (stream) => {
   try {
     if (stream?.track?.kind === 'video') {
       const el = document.createElement('video');
@@ -93,7 +76,6 @@ const attachRemoteStream = (stream, pubId) => {
       // autoplayポリシー対策
       el.play?.().catch(() => {});
       RemoteVideos.value.push(el);
-      if (pubId) PubIdToElement.set(pubId, el); // （追加）
     } else if (stream?.track?.kind === 'audio') {
       const el = document.createElement('audio');
       el.autoplay = true;
@@ -103,52 +85,15 @@ const attachRemoteStream = (stream, pubId) => {
       stream.attach(el);
       el.play?.().catch(() => {});
       RemoteVideos.value.push(el);
-      if (pubId) PubIdToElement.set(pubId, el); // （追加）
     }
   } catch (err) {
     console.error('attachRemoteStream failed:', err);
   }
 };
 
-// 自分起点のpublicationかを判定（強化版）
-const isMyOriginPublication = (pub, me) => {
-  try {
-    if (!pub) return false;
-    if (pub.publisher?.id === me.id) return true;
-    // SDK差異に対応して複数の候補を参照
-    const originPublisherId =
-      pub.origin?.publisher?.id ??
-      pub.originPublisher?.id ??
-      pub.origin?.id ??
-      pub.originId ??
-      pub.contentOrigin?.publisherId ??
-      null;
-    return originPublisherId === me.id;
-  } catch {
-    return false;
-  }
-};
-
-// publication を安全に subscribe（レース対策を強化）
-const safeSubscribe = async (pub, me) => {
-  try {
-    if (!pub) return;
-    if (isMyOriginPublication(pub, me)) return;
-    if (SubscribedPubIds.has(pub.id)) return;
-
-    // （追加）await 前に予約登録して二重実行を防ぐ
-    SubscribedPubIds.add(pub.id);
-
-    const { stream } = await me.subscribe(pub.id);
-    attachRemoteStream(stream, pub.id); // （変更）共通のattachを使い、pubIdを記録
-  } catch (err) {
-    console.warn('subscribe failed:', err);
-  }
-};
-
 // ルーム参加
 const joinRoom = async () => {
-  if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
+  if (Joining.value || Joined.value) return;
   if (!RoomId.value) {
     alert('No Room ID');
     return;
@@ -157,7 +102,7 @@ const joinRoom = async () => {
     Joining.value = true;
 
     // まだルームが作成されていない場合は作る
-    if (!RoomCreated.value || !context.room) { // room を破棄するので null チェック追加
+    if (!RoomCreated.value) {
       await createRoom();
     }
 
@@ -174,9 +119,10 @@ const joinRoom = async () => {
     LocalVideoStream.value = videoStream;
     LocalAudioStream.value = audioStream;
 
-    // 映像/音声を publish（戻り値を保持：unpublish用）
-    LocalVideoPub.value = await member.publish(videoStream);
-    LocalAudioPub.value = await member.publish(audioStream);
+    // 映像を publish
+    await member.publish(videoStream);
+    // 音声を publish (必要なら)
+    await member.publish(audioStream);
 
     // ローカル video 要素
     const localVideoEl = document.createElement('video');
@@ -185,49 +131,34 @@ const joinRoom = async () => {
     localVideoEl.autoplay = true;
     localVideoEl.className = 'w-64 h-48 object-cover rounded border';
     StreamArea.value.appendChild(localVideoEl);
-    // SkyWay の stream を video に接続
-    videoStream.attach(localVideoEl);
+
     // 退出時に解放するため保持（追加）
     LocalVideoEl.value = localVideoEl;
 
+    // SkyWay の stream を video に接続
+    videoStream.attach(localVideoEl);
+
     // 既存の公開中ストリームにsubscribe（重要）
     for (const pub of context.room.publications ?? []) {
-      await safeSubscribe(pub, member); // フィルタと二重防止を適用（追加）
-    }
-
-    // 既存のハンドラが残っていたら一旦remove（追加）
-    if (onStreamPublishedHandler && context.room) {
-      try { context.room.onStreamPublished.remove(onStreamPublishedHandler); } catch {}
-      onStreamPublishedHandler = null;
-    }
-    if (onStreamUnpublishedHandler && context.room) { // （追加）
-      try { context.room.onStreamUnpublished.remove(onStreamUnpublishedHandler); } catch {}
-      onStreamUnpublishedHandler = null;
+      if (pub.publisher.id === member.id) continue;
+      try {
+        const { stream } = await member.subscribe(pub.id);
+        attachRemoteStream(stream);
+      } catch (err) {
+        console.warn('subscribe existing pub failed:', err);
+      }
     }
 
     // 以後新規公開にもsubscribe（重要）
-    onStreamPublishedHandler = async (e) => {
-      await safeSubscribe(e.publication, member); // フィルタと二重防止を適用（追加）
-    };
-    context.room.onStreamPublished.add(onStreamPublishedHandler);
-
-    // （追加）unpublish されたら要素を片付ける
-    onStreamUnpublishedHandler = (e) => {
-      const pubId = e.publication?.id;
-      if (!pubId) return;
-      const el = PubIdToElement.get(pubId);
-      if (el) {
-        try {
-          el.pause?.();
-          el.srcObject = null;
-          el.remove();
-        } catch {}
-        PubIdToElement.delete(pubId);
+    context.room.onStreamPublished.add(async (e) => {
+      if (e.publication.publisher.id === member.id) return;
+      try {
+        const { stream } = await member.subscribe(e.publication.id);
+        attachRemoteStream(stream);
+      } catch (err) {
+        console.warn('subscribe new pub failed:', err);
       }
-      // 購読済みIDも解除
-      SubscribedPubIds.delete(pubId);
-    };
-    context.room.onStreamUnpublished.add(onStreamUnpublishedHandler);
+    });
 
     // 参考: すでに用意済みのイベントハンドラを拡張したい場合はこれでもOK
     // member.onPublicationSubscribed.add(({ stream }) => {
@@ -245,31 +176,17 @@ const joinRoom = async () => {
 
 // 退出（Leave）
 const leaveRoom = async () => {
-  if (Leaving.value) return; // 二重押下防止（追加）
-  Leaving.value = true;
   try {
-    // ルームのイベントハンドラを解除（追加）
-    if (onStreamPublishedHandler && context.room) {
-      try { context.room.onStreamPublished.remove(onStreamPublishedHandler); } catch {}
-      onStreamPublishedHandler = null;
-    }
-    if (onStreamUnpublishedHandler && context.room) { // （追加）
-      try { context.room.onStreamUnpublished.remove(onStreamUnpublishedHandler); } catch {}
-      onStreamUnpublishedHandler = null;
-    }
-
-    // 自分のpublicationを明示的にunpublish（追加）
-    if (LocalMember.value) {
-      for (const pub of [LocalVideoPub.value, LocalAudioPub.value]) {
-        if (pub?.id) {
-          try { await LocalMember.value.unpublish(pub.id); } catch {}
+    // ルーム離脱（チャンネルに居るときのみ実行：ガードを追加）
+    if (LocalMember.value?.leave) {
+      try {
+        // SkyWay SDKの内部状態によっては未参加で例外が出るため channel 存在でガード
+        if (LocalMember.value.channel) {
+          await LocalMember.value.leave();
         }
+      } catch (err) {
+        console.warn('leave skipped or failed:', err);
       }
-    }
-
-    // ルーム離脱（チャンネルに居るときのみ実行：ガード）
-    if (LocalMember.value?.leave && LocalMember.value.channel) {
-      await LocalMember.value.leave();
     }
 
     // ローカルメディアの解放
@@ -294,23 +211,16 @@ const leaveRoom = async () => {
     }
     LocalVideoEl.value = null;
 
-    // リモート要素の削除（PubIdToElement と RemoteVideos 両方を掃除）
+    // リモート要素の削除（RemoteMediaEls ではなく RemoteVideos を使用）
     for (const el of RemoteVideos.value) {
       try {
         el.pause?.();
+        // skyway attach は srcObject を直接使わない場合もあるが、明示クリア
         el.srcObject = null;
         el.remove();
       } catch {}
     }
     RemoteVideos.value = [];
-    for (const [, el] of PubIdToElement.entries()) {
-      try {
-        el.pause?.();
-        el.srcObject = null;
-        el.remove();
-      } catch {}
-    }
-    PubIdToElement.clear();
 
     // 状態初期化（RoomIdは残す＝再参加しやすくする）
     Joined.value = false;
@@ -318,17 +228,11 @@ const leaveRoom = async () => {
     LocalMember.value = null;
     LocalVideoStream.value = null;
     LocalAudioStream.value = null;
-    LocalVideoPub.value = null; // （追加）
-    LocalAudioPub.value = null; // （追加）
-    SubscribedPubIds.clear();   // （追加）
 
-    // 重要: 同じ Room インスタンスでの再 join を避けるため破棄（追加）
-    RoomCreated.value = false;
-    context.room = null;
+    // ルーム自体は保持（再Joinを容易に）。完全に閉じたいなら:
+    // RoomCreated.value = false; context.room = null;
   } catch (e) {
     console.error('leave failed:', e);
-  } finally {
-    Leaving.value = false;
   }
 };
 
@@ -359,20 +263,19 @@ onMounted(async () => {
 
         <button
           v-if="RoomId && !Joined"
-          :disabled="Joining || Leaving"   
+          :disabled="Joining"
           @click="joinRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
         >
           {{ Joining ? 'Joining...' : 'Join Room' }}
         </button>
 
-        <button
+         <button
           v-if="Joined"
-          :disabled="Leaving"            
           @click="leaveRoom"
-          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
+          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400"
         >
-          {{ Leaving ? 'Leaving...' : 'Leave Room' }}
+          Leave Room
         </button>
       </div>
 
