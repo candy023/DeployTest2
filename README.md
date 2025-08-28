@@ -1,7 +1,7 @@
 # webrtc
 
 このアプリケーションは、Gatherのようなオンライン会話ツールで、WebRTCを利用してリアルタイムでビデオ・音声通話を行うこを想定しています。
-## 🛠️技術
+## 技術
 
 - **フロントエンド**: Vue 3 + Vite
 - **WebRTC**: SkyWay SDK
@@ -9,7 +9,7 @@
 - **ビルドツール**: Vite
 - **パッケージマネージャー**: npm
 
-## #条件
+###条件
 
 - **Node.js** (バージョン 18.0.0 以上推奨)
 - **npm** (Node.jsに付属)
@@ -24,18 +24,17 @@
 VITE_SKYWAY_APP_ID=your_skyway_app_id
 VITE_SKYWAY_SECRET_KEY=your_skyway_secret_ke
 ```
+1. リポジトリのクローン
+```bash
+git clone https://github.com/candy023/WEBRTC.git
+```
+# package.jsonに記載された全ての依存関係をインストール
+```
+bashnpm install
+```
+#ローカルでの起動
+```
+npm run dev
+```
 
-```bash
-# Viteプロジェクトの作成
-npm create vite@latest myproject
-cd myproject
 
-```
-### 4. Tailwind CSSのセットアップ
-```bash
-npm install -D @tailwindcss/postcss
-```
-### 5. SkyWay SDKの設定（APIは公式ページで取得）
-```bash
-npm install @skyway-sdk/room @skyway-sdk/token
-```
