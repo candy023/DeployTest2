@@ -1,6 +1,35 @@
-# Vue 3 + Vite
+# webrtc
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+このアプリケーションは、Gatherのようなオンライン会話ツールで、WebRTCを利用してリアルタイムでビデオ・音声通話を行うこを想定しています。
+## 🛠️技術
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
-# DeployTest2
+- **フロントエンド**: Vue 3 + Vite
+- **WebRTC**: SkyWay SDK
+- **スタイリング**: **Tailwind CSS v4**
+- **ビルドツール**: Vite
+- **パッケージマネージャー**: npm
+
+## #条件
+
+- **Node.js** (バージョン 18.0.0 以上推奨)
+- **npm** (Node.jsに付属)
+- **SkyWayアカウント** ([SkyWay](https://skyway.ntt.com/)で取得)
+
+## ⚙️ 環境変数の設定
+
+プロジェクトルートに `.env` ファイルを作成し、以下を設定：
+
+```bash
+# SkyWay設定
+VITE_SKYWAY_APP_ID=your_skyway_app_id
+VITE_SKYWAY_SECRET_KEY=your_skyway_secret_ke
+```
+
+```bash
+# Viteプロジェクトの作成
+npm create vite@latest myproject
+cd myproject
+
+```
+
+### 4. Tailwind CSSのセットアップ
