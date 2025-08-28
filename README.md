@@ -35,3 +35,7 @@ cd myproject
 ```bash
 npm install -D @tailwindcss/postcss
 ```
+### 5. SkyWay SDKの設定（APIは公式ページで取得）
+```bash
+npm install @skyway-sdk/room @skyway-sdk/token
+```
