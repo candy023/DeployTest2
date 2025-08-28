@@ -31,5 +31,7 @@ npm create vite@latest myproject
 cd myproject
 
 ```
-
 ### 4. Tailwind CSSのセットアップ
+```bash
+npm install -D @tailwindcss/postcss
+```
