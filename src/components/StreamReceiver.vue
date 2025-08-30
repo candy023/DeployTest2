@@ -31,6 +31,10 @@ const LocalVideoEl = ref(null);
 // 退出中フラグ（追加：leave 完了前の再 join を防止）
 const Leaving = ref(false);
 
+// ミュート状態管理（新規追加）
+const IsAudioMuted = ref(false);
+const IsVideoMuted = ref(false);
+
 const baseUrl = window.location.href.split('?')[0];
 
 // SkyWay Context 作成
@@ -92,6 +96,19 @@ const attachRemoteStream = (stream) => {
     console.error('attachRemoteStream failed:', err);
   }
 };
+
+// 音声ミュート切り替え（新規追加）
+const toggleAudioMute = () => {
+  IsAudioMuted.value = !IsAudioMuted.value;
+  LocalAudioStream.value?.setMuted(IsAudioMuted.value);
+};
+
+// 映像ミュート切り替え（新規追加）
+const toggleVideoMute = () => {
+  IsVideoMuted.value = !IsVideoMuted.value;
+  LocalVideoStream.value?.setMuted(IsVideoMuted.value);
+};
+
 // ルーム参加
 const joinRoom = async () => {
   if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
@@ -222,6 +239,10 @@ const leaveRoom = async () => {
     LocalVideoStream.value = null;
     LocalAudioStream.value = null;
 
+    // ミュート状態初期化（新規追加）
+    IsAudioMuted.value = false;
+    IsVideoMuted.value = false;
+
     // 重要: 同じ Room インスタンスでの再 join を避けるため破棄（追加）
     RoomCreated.value = false;
     context.room = null;
@@ -279,6 +300,35 @@ onMounted(async () => {
         {{ ErrorMessage }}
       </div>
     </div>
+
+     <!-- ミュートボタン（新規追加） -->
+      <div v-if="Joined" class="space-x-2">
+        <!-- 音声ミュートボタン -->
+        <button
+          @click="toggleAudioMute"
+          :class="[
+            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
+            IsAudioMuted 
+              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
+              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
+          ]"
+        >
+          {{ IsAudioMuted ? '🔇 ミュート中' : '🎤 音声ON' }}
+        </button>
+
+        <!-- 映像ミュートボタン -->
+        <button
+          @click="toggleVideoMute"
+          :class="[
+            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
+            IsVideoMuted 
+              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
+              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
+          ]"
+        >
+          {{ IsVideoMuted ? '📹 映像OFF' : '📹 映像ON' }}
+        </button>
+      </div>
 
     <!-- ルーム情報表示 -->
     <div v-if="RoomId" class="space-y-2 text-sm">
