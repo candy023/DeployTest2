@@ -7,12 +7,8 @@ import GetToken from './SkywayToken.js';
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
 const secret = import.meta.env.VITE_SKYWAY_SECRET_KEY;
 
-// トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
-const tokenString = GetToken(appId, secret);
-
-// SkyWay context & room
-const context = { ctx: null, room: null };
-
+const tokenString = GetToken(appId, secret);// トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
+const context = { ctx: null, room: null };// SkyWay context & room
 // refs / state
 const StreamArea = ref(null);
 const RoomCreated = ref(false);
@@ -22,20 +18,38 @@ const Joined = ref(false);
 const LocalMember = ref(null);
 const ErrorMessage = ref('');
 const RemoteVideos = ref([]); // 受信した remote streams 用
-
 // 退出時に解放するために保持（追加）
 const LocalVideoStream = ref(null);
 const LocalAudioStream = ref(null);
 const LocalVideoEl = ref(null);
-
-// 退出中フラグ（追加：leave 完了前の再 join を防止）
-const Leaving = ref(false);
-
+const Leaving = ref(false);// 退出中フラグ（追加：leave 完了前の再 join を防止）
 // ミュート状態管理（新規追加）
 const IsAudioMuted = ref(false);
 const IsVideoMuted = ref(false);
-
 const baseUrl = window.location.href.split('?')[0];
+// Publication を保持（publish の戻り値として得られるオブジェクト）
+const LocalVideoPublication = ref(null);
+const LocalAudioPublication = ref(null);
+
+// ヘルパ: SkyWay stream オブジェクトから MediaStreamTrack を取り出す
+const extractTrack = (stream, kind = 'video') => {
+  if (!stream) return null;
+  // SDK が .track を提供している場合
+  if (stream.track && stream.track.kind === kind) return stream.track;
+  // SDK が .mediaStream を持つ場合
+  if (stream.mediaStream) {
+    const tracks = kind === 'audio'
+      ? stream.mediaStream.getAudioTracks()
+      : stream.mediaStream.getVideoTracks();
+    if (tracks && tracks.length) return tracks[0];
+  }
+  // もし渡されるのが生の MediaStream の場合
+  if (typeof stream.getTracks === 'function') {
+    const tracks = kind === 'audio' ? stream.getAudioTracks() : stream.getVideoTracks();
+    if (tracks && tracks.length) return tracks[0];
+  }
+  return null;
+};
 
 // SkyWay Context 作成
 const getContext = async () => {
@@ -70,19 +84,40 @@ const createRoom = async () => {
   }
 };
 // 受信ストリームをDOMへattach（映像/音声対応）
+// track の onmute/onunmute で動画の見た目（暗転）を制御
 const attachRemoteStream = (stream) => {
   try {
-    if (stream?.track?.kind === 'video') {
+    if (!StreamArea.value) return;
+
+    const hasVideo = !!(stream?.track?.kind === 'video' || (stream.mediaStream && stream.mediaStream.getVideoTracks?.().length));
+    const hasAudio = !!(stream?.track?.kind === 'audio' || (stream.mediaStream && stream.mediaStream.getAudioTracks?.().length));
+
+    if (hasVideo) {
       const el = document.createElement('video');
       el.autoplay = true;
       el.playsInline = true;
       el.className = 'w-64 h-48 object-cover rounded border';
       StreamArea.value.appendChild(el);
       stream.attach(el);
-      // autoplayポリシー対策
       el.play?.().catch(() => {});
+
+      const track = extractTrack(stream, 'video');
+      if (track) {
+        // 初期表示（無効なら暗く）
+        if (track.enabled === false) {
+          el.style.filter = 'brightness(30%)';
+        }
+        // mute/unmute イベントで見た目を制御
+        track.onmute = () => {
+          el.style.filter = 'brightness(30%)';
+        };
+        track.onunmute = () => {
+          el.style.filter = 'none';
+        };
+      }
+
       RemoteVideos.value.push(el);
-    } else if (stream?.track?.kind === 'audio') {
+    } else if (hasAudio) {
       const el = document.createElement('audio');
       el.autoplay = true;
       el.controls = false;
@@ -97,16 +132,86 @@ const attachRemoteStream = (stream) => {
   }
 };
 
-// 音声ミュート切り替え（新規追加）
-const toggleAudioMute = () => {
-  IsAudioMuted.value = !IsAudioMuted.value;
-  LocalAudioStream.value?.setMuted(IsAudioMuted.value);
+
+// Publication.disable/enable を使ってミュートする関数（優先）
+const togglePublicationMute = async (pubRef, isMutedRef) => {
+  const pub = pubRef.value;
+  if (!pub) return false;
+  try {
+    const willMute = !isMutedRef.value;
+    if (willMute) {
+      // mute
+      if (typeof pub.disable === 'function') {
+        await pub.disable();
+        isMutedRef.value = true;
+        return true;
+      }
+    } else {
+      // unmute
+      if (typeof pub.enable === 'function') {
+        await pub.enable();
+        isMutedRef.value = false;
+        return true;
+      }
+    }
+  } catch (e) {
+    console.error('togglePublicationMute error:', e);
+    return false;
+  }
+  return false;
 };
 
-// 映像ミュート切り替え（新規追加）
-const toggleVideoMute = () => {
-  IsVideoMuted.value = !IsVideoMuted.value;
-  LocalVideoStream.value?.setMuted(IsVideoMuted.value);
+// 代替: MediaStreamTrack.enabled を切り替えるフォールバック
+const setStreamMutedFallback = (skywayStream, kind, muted) => {
+  const track = extractTrack(skywayStream, kind);
+  if (!track) {
+    console.warn('No track found for fallback mute:', kind, skywayStream);
+    return false;
+  }
+  try {
+    track.enabled = !muted;
+    return true;
+  } catch (e) {
+    console.error('setStreamMutedFallback error:', e);
+    return false;
+  }
+};
+
+// 音声ミュート切り替え
+const toggleAudioMute = async () => {
+  // まず Publication API を試す
+  let ok = await togglePublicationMute(LocalAudioPublication, IsAudioMuted);
+  if (!ok) {
+    // フォールバック: track.enabled を切り替える
+    const newMuted = !IsAudioMuted.value;
+    const fOk = setStreamMutedFallback(LocalAudioStream.value, 'audio', newMuted);
+    if (fOk) IsAudioMuted.value = newMuted;
+    ok = fOk;
+  }
+  if (!ok) console.warn('Audio mute/unmute failed (no publication & no track)');
+};
+
+// 映像ミュート切り替え（修正版）
+const toggleVideoMute = async () => {
+  // まず Publication API を試す（togglePublicationMute は isMutedRef を更新する）
+  let ok = await togglePublicationMute(LocalVideoPublication, IsVideoMuted);
+
+  // Publication API が使えずフォールバックした場合はここでフラグを反転して更新する
+  if (!ok) {
+    const newMuted = !IsVideoMuted.value;
+    const fOk = setStreamMutedFallback(LocalVideoStream.value, 'video', newMuted);
+    if (fOk) {
+      IsVideoMuted.value = newMuted;
+      ok = true;
+    }
+  }
+
+  // 最終的なフラグ IsVideoMuted.value を参照してローカルの見た目を更新（反転や ! を使わない）
+  if (LocalVideoEl.value) {
+    LocalVideoEl.value.style.filter = IsVideoMuted.value ? 'brightness(30%)' : 'none';
+  }
+
+  if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
 
 // ルーム参加
@@ -137,10 +242,20 @@ const joinRoom = async () => {
     LocalVideoStream.value = videoStream;
     LocalAudioStream.value = audioStream;
 
-    // 映像を publish
-    await member.publish(videoStream);
-    // 音声を publish (必要なら)
-    await member.publish(audioStream);
+// publish と Publication を保持（戻り値を受け取る）
+const videoPub = await member.publish(videoStream);
+const audioPub = await member.publish(audioStream);
+LocalVideoPublication.value = videoPub;
+LocalAudioPublication.value = audioPub;
+
+// デバッグ出力（Join 後に Console で確認しやすくする）
+console.log('LocalVideoPublication:', LocalVideoPublication.value);
+console.log('LocalAudioPublication:', LocalAudioPublication.value);
+// 開発時だけ window に展開して手動確認できるようにする（終了時に削除してOK）
+try {
+  window.__localVideoPublication = LocalVideoPublication.value;
+  window.__localAudioPublication = LocalAudioPublication.value;
+} catch (e) {}
 
     // ローカル video 要素
     const localVideoEl = document.createElement('video');
@@ -264,7 +379,7 @@ onMounted(async () => {
 
 <template>
   <div class="p-4 space-y-6">
-    <h1 class="text-2xl font-bold">Kaigi</h1>
+    <h1 class="text-2xl font-bold">会議</h1>
 
     <div class="flex gap-4 flex-wrap">
       <!-- ボタンエリア -->
@@ -274,7 +389,7 @@ onMounted(async () => {
           @click="createRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 active:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
         >
-          Create Room
+          ルーム作成
         </button>
 
         <button
@@ -283,7 +398,7 @@ onMounted(async () => {
           @click="joinRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
         >
-          {{ Joining ? 'Joining...' : 'Join Room' }}
+          {{ Joining ? 'Joining...' : 'ルーム参加' }}
         </button>
 
          <button
@@ -292,7 +407,7 @@ onMounted(async () => {
           @click="leaveRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
         >
-          {{ Leaving ? 'Leaving...' : 'Leave Room' }}
+          {{ Leaving ? 'Leaving...' : 'ルーム退出' }}
         </button>
       </div>
 
