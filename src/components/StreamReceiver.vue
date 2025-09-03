@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue'; // onUnmountedを追加
 import { SkyWayContext, SkyWayRoom, SkyWayStreamFactory, uuidV4 } from '@skyway-sdk/room';
 import GetToken from './SkywayToken.js';
 
@@ -26,10 +26,12 @@ const Leaving = ref(false);// 退出中フラグ（追加：leave 完了前の�
 // ミュート状態管理（新規追加）
 const IsAudioMuted = ref(false);
 const IsVideoMuted = ref(false);
+const IsScreenSharing = ref(false); // 画面共有状態管理（追加）
 const baseUrl = window.location.href.split('?')[0];
 // Publication を保持（publish の戻り値として得られるオブジェクト）
 const LocalVideoPublication = ref(null);
 const LocalAudioPublication = ref(null);
+const EnlargedVideo = ref(null);// 拡大表示用の状態管理（追加）
 
 // ヘルパ: SkyWay stream オブジェクトから MediaStreamTrack を取り出す
 const extractTrack = (stream, kind = 'video') => {
@@ -85,6 +87,8 @@ const createRoom = async () => {
 };
 // 受信ストリームをDOMへattach（映像/音声対応）
 // track の onmute/onunmute で動画の見た目（暗転）を制御
+// 受信ストリームをDOMへattach（映像/音声対応）
+// attachRemoteStream関数でボタンに固有IDを設定
 const attachRemoteStream = (stream) => {
   try {
     if (!StreamArea.value) return;
@@ -93,21 +97,42 @@ const attachRemoteStream = (stream) => {
     const hasAudio = !!(stream?.track?.kind === 'audio' || (stream.mediaStream && stream.mediaStream.getAudioTracks?.().length));
 
     if (hasVideo) {
+      const container = document.createElement('div');
+      container.className = 'relative inline-block';
+      StreamArea.value.appendChild(container);
+
       const el = document.createElement('video');
       el.autoplay = true;
       el.playsInline = true;
-      el.className = 'w-64 h-48 object-cover rounded border';
-      StreamArea.value.appendChild(el);
+      el.className = 'w-96 h-72 object-cover rounded border';
+      container.appendChild(el);
+
+      // 拡大ボタンを作成
+      const enlargeBtn = document.createElement('button');
+      enlargeBtn.innerHTML = '⛶';
+      enlargeBtn.className = 'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
+      
+      // より確実なイベント設定
+      enlargeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        enlargeVideo(el);
+      });
+      
+      container.appendChild(enlargeBtn);
+
+      // 要素の関連付けを保存
+      el.__container = container;
+      el.__enlargeBtn = enlargeBtn;
+
       stream.attach(el);
       el.play?.().catch(() => {});
 
       const track = extractTrack(stream, 'video');
       if (track) {
-        // 初期表示（無効なら暗く）
         if (track.enabled === false) {
           el.style.filter = 'brightness(30%)';
         }
-        // mute/unmute イベントで見た目を制御
         track.onmute = () => {
           el.style.filter = 'brightness(30%)';
         };
@@ -116,7 +141,7 @@ const attachRemoteStream = (stream) => {
         };
       }
 
-      RemoteVideos.value.push(el);
+      RemoteVideos.value.push(container);
     } else if (hasAudio) {
       const el = document.createElement('audio');
       el.autoplay = true;
@@ -131,7 +156,6 @@ const attachRemoteStream = (stream) => {
     console.error('attachRemoteStream failed:', err);
   }
 };
-
 
 // Publication.disable/enable を使ってミュートする関数（優先）
 const togglePublicationMute = async (pubRef, isMutedRef) => {
@@ -213,6 +237,118 @@ const toggleVideoMute = async () => {
 
   if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
+//画面共有
+const screenshare = async () => {
+  if (!LocalMember.value) return;
+  
+  try {
+    if (IsScreenSharing.value) {
+      // 画面共有停止 - 元のカメラ映像に戻す
+      await LocalMember.value.unpublish(LocalVideoPublication.value);
+      
+      // カメラ映像を再作成してpublish
+      const cameraStream = await SkyWayStreamFactory.createCameraVideoStream();
+      LocalVideoStream.value = cameraStream;
+      LocalVideoPublication.value = await LocalMember.value.publish(cameraStream);
+      
+      // ローカル映像要素を更新
+      if (LocalVideoEl.value) {
+        cameraStream.attach(LocalVideoEl.value);
+      }
+      
+      IsScreenSharing.value = false;
+    } else {
+      // 画面共有開始
+      const { video: screenStream } = await SkyWayStreamFactory.createDisplayStreams({
+        audio: false,
+        video: {
+          displaySurface: 'monitor'
+        }
+      });
+      
+      // 現在の映像をunpublish
+      await LocalMember.value.unpublish(LocalVideoPublication.value);
+      
+      // 画面共有をpublish
+      LocalVideoStream.value = screenStream;
+      LocalVideoPublication.value = await LocalMember.value.publish(screenStream);
+      
+      // ローカル映像要素を更新
+      if (LocalVideoEl.value) {
+        screenStream.attach(LocalVideoEl.value);
+      }
+      
+      IsScreenSharing.value = true;
+    }
+  } catch (error) {
+    console.error('画面共有エラー:', error);
+    ErrorMessage.value = '画面共有に失敗しました: ' + error.message;
+  }
+};
+
+// 映像拡大機能（追加）
+// enlargeVideo関数を以下のように修正
+const enlargeVideo = (videoEl) => {
+  if (EnlargedVideo.value) return;
+  
+  videoEl.__originalClass = videoEl.className;
+  videoEl.__originalParent = videoEl.parentNode;
+  videoEl.__originalNextSibling = videoEl.nextSibling; // 元の位置を保存
+  
+  videoEl.className = 'fixed inset-0 w-screen h-screen object-contain bg-black z-50 cursor-pointer';
+  document.body.appendChild(videoEl);
+  
+  // 閉じるボタンを追加
+  const closeBtn = document.createElement('button');
+  closeBtn.innerHTML = '✕';
+  closeBtn.className = 'fixed top-4 right-4 z-50 bg-red-600 text-white p-3 rounded-full hover:bg-red-700 text-xl font-bold';
+  closeBtn.onclick = (e) => {
+    e.stopPropagation();
+    shrinkVideo();
+  };
+  document.body.appendChild(closeBtn);
+  
+  // 映像をクリックで閉じる
+  videoEl.onclick = shrinkVideo;
+  
+  videoEl.__closeBtn = closeBtn;
+  EnlargedVideo.value = videoEl;
+};
+
+// shrinkVideo関数を以下のように修正
+const shrinkVideo = () => {
+  if (!EnlargedVideo.value) return;
+  
+  const videoEl = EnlargedVideo.value;
+  videoEl.className = videoEl.__originalClass;
+  
+  // 元の位置に正確に戻す
+  if (videoEl.__originalNextSibling) {
+    videoEl.__originalParent.insertBefore(videoEl, videoEl.__originalNextSibling);
+  } else {
+    videoEl.__originalParent.appendChild(videoEl);
+  }
+  
+  videoEl.onclick = null; // クリックイベントを削除
+  
+  // 閉じるボタンを削除
+  if (videoEl.__closeBtn) {
+    videoEl.__closeBtn.remove();
+    delete videoEl.__closeBtn;
+  }
+  
+  // 保存した参照をクリーンアップ
+  delete videoEl.__originalNextSibling;
+  
+  EnlargedVideo.value = null;
+};
+
+// ESCキーで縮小（追加）
+const handleKeydown = (e) => {
+  if (e.key === 'Escape' && EnlargedVideo.value) {
+    shrinkVideo();
+  }
+};
 
 // ルーム参加
 const joinRoom = async () => {
@@ -258,27 +394,29 @@ try {
 } catch (e) {}
 
     // ローカル video 要素
+       // ローカル映像用コンテナ（追加）
+    const localContainer = document.createElement('div');
+    localContainer.className = 'relative inline-block';
+    StreamArea.value.appendChild(localContainer);
+
     const localVideoEl = document.createElement('video');
     localVideoEl.muted = true;
     localVideoEl.playsInline = true;
     localVideoEl.autoplay = true;
-    localVideoEl.className = 'w-64 h-48 object-cover rounded border';
-    StreamArea.value.appendChild(localVideoEl);
+    localVideoEl.className = 'w-96 h-72 object-cover rounded border';
+    localContainer.appendChild(localVideoEl);
+
+    // ローカル映像用拡大ボタン（追加）
+    const localEnlargeBtn = document.createElement('button');
+    localEnlargeBtn.innerHTML = '⛶';
+    localEnlargeBtn.className = 'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
+    localEnlargeBtn.onclick = () => enlargeVideo(localVideoEl);
+    localContainer.appendChild(localEnlargeBtn);
+
     // SkyWay の stream を video に接続
     videoStream.attach(localVideoEl);
     // 退出時に解放するため保持（追加）
     LocalVideoEl.value = localVideoEl;
-
-    // 既存の公開中ストリームにsubscribe（重要）
-    for (const pub of context.room.publications ?? []) {
-      if (pub.publisher.id === member.id) continue;
-      try {
-        const { stream } = await member.subscribe(pub.id);
-        attachRemoteStream(stream);
-      } catch (err) {
-        console.warn('subscribe existing pub failed:', err);
-      }
-    }
 
     // 以後新規公開にもsubscribe（重要）
     context.room.onStreamPublished.add(async (e) => {
@@ -374,11 +512,26 @@ onMounted(async () => {
   if (qRoom) {
     RoomId.value = qRoom;
   }
+  // ESCキーリスナー追加
+  document.addEventListener('keydown', handleKeydown);
+});
+
+// クリーンアップ（追加）
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown);
 });
 </script>
 
 <template>
   <div class="p-4 space-y-6">
+        <!-- 拡大表示中の縮小用オーバーレイ（追加） -->
+    <div 
+      v-if="EnlargedVideo" 
+      @click="shrinkVideo"
+      class="fixed inset-0 bg-transparent z-40 cursor-pointer"
+      title="クリックして元のサイズに戻す"
+    ></div>
+
     <h1 class="text-2xl font-bold">会議</h1>
 
     <div class="flex gap-4 flex-wrap">
@@ -442,6 +595,18 @@ onMounted(async () => {
           ]"
         >
           {{ IsVideoMuted ? '📹 映像OFF' : '📹 映像ON' }}
+        </button>
+        <!--画面共有ボタン-->
+        <button
+          @click="screenshare"
+          :class="[
+            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
+            IsScreenSharing
+              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400'
+              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
+          ]"
+        >
+          {{ IsScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
         </button>
       </div>
 
