@@ -16,7 +16,10 @@
 - **SkyWayアカウント** ([SkyWay](https://skyway.ntt.com/)で取得)
 
 ## ⚙️ 環境変数の設定
-
+1. リポジトリのクローン
+```bash
+git clone https://github.com/candy023/WEBRTC.git
+```
 プロジェクトルートに `.env` ファイルを作成し、以下を設定：
 
 ```bash
@@ -24,10 +27,7 @@
 VITE_SKYWAY_APP_ID=your_skyway_app_id
 VITE_SKYWAY_SECRET_KEY=your_skyway_secret_ke
 ```
-1. リポジトリのクローン
-```bash
-git clone https://github.com/candy023/WEBRTC.git
-```
+
 # package.jsonに記載された全ての依存関係をインストール
 ```
 bashnpm install
