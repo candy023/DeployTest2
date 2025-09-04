@@ -1,7 +1,10 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'; // onUnmountedを追加
+import { ref, onMounted, onUnmounted } from 'vue'; 
 import { SkyWayContext, SkyWayRoom, SkyWayStreamFactory, uuidV4 } from '@skyway-sdk/room';
 import GetToken from './SkywayToken.js';
+//トースト追加
+import { toast } from 'vue3-toastify';
+import "vue3-toastify/dist/index.css";
 
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
@@ -26,7 +29,8 @@ const Leaving = ref(false);// 退出中フラグ（追加：leave 完了前の�
 // ミュート状態管理（新規追加）
 const IsAudioMuted = ref(false);
 const IsVideoMuted = ref(false);
-const IsScreenSharing = ref(false); // 画面共有状態管理（追加）
+// 画面共有状態管理（追加）
+const IsScreenSharing = ref(false); 
 const baseUrl = window.location.href.split('?')[0];
 // Publication を保持（publish の戻り値として得られるオブジェクト）
 const LocalVideoPublication = ref(null);
@@ -64,7 +68,7 @@ const getContext = async () => {
     });
     return context.ctx;
   } catch (e) {
-    ErrorMessage.value = 'Context 作成失敗: ' + e;
+    toast.error('Context 作成失敗: ' + e);
     console.error(e);
   }
 };
@@ -81,7 +85,7 @@ const createRoom = async () => {
     });
     RoomCreated.value = true;
   } catch (e) {
-    ErrorMessage.value = 'Room 作成失敗: ' + e;
+    toast.error('Room 作成失敗: ' + e);
     console.error(e);
   }
 };
@@ -238,14 +242,13 @@ const toggleVideoMute = async () => {
   if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
 //画面共有
-const screenshare = async () => {
+const screenShare = async () => {
   if (!LocalMember.value) return;
   
   try {
     if (IsScreenSharing.value) {
       // 画面共有停止 - 元のカメラ映像に戻す
       await LocalMember.value.unpublish(LocalVideoPublication.value);
-      
       // カメラ映像を再作成してpublish
       const cameraStream = await SkyWayStreamFactory.createCameraVideoStream();
       LocalVideoStream.value = cameraStream;
@@ -282,12 +285,12 @@ const screenshare = async () => {
     }
   } catch (error) {
     console.error('画面共有エラー:', error);
-    ErrorMessage.value = '画面共有に失敗しました: ' + error.message;
+    toast.value = '画面共有に失敗しました: ' + error.message;
   }
 };
 
-// 映像拡大機能（追加）
-// enlargeVideo関数を以下のように修正
+// 映像拡大機能
+// enlargeVideo関数
 const enlargeVideo = (videoEl) => {
   if (EnlargedVideo.value) return;
   
@@ -354,7 +357,7 @@ const handleKeydown = (e) => {
 const joinRoom = async () => {
   if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
   if (!RoomId.value) {
-    alert('No Room ID');
+    toast.error('ルームIDが設定されていません');
     return;
   }
   try {
@@ -436,7 +439,7 @@ try {
 
     Joined.value = true;
   } catch (e) {
-    ErrorMessage.value = 'Join 失敗: ' + e;
+    toast.error('ルーム参加に失敗しました: ' + e);
     console.error(e);
   } finally {
     Joining.value = false;
@@ -598,7 +601,7 @@ onUnmounted(() => {
         </button>
         <!--画面共有ボタン-->
         <button
-          @click="screenshare"
+          @click="screenShare"
           :class="[
             'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
             IsScreenSharing
