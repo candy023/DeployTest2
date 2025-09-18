@@ -2,40 +2,42 @@
 import { ref, onMounted, onUnmounted } from 'vue'; 
 import { SkyWayContext, SkyWayRoom, SkyWayStreamFactory, uuidV4 } from '@skyway-sdk/room';
 import GetToken from './SkywayToken.js';
-//トースト追加
 import { toast } from 'vue3-toastify';
 import "vue3-toastify/dist/index.css";
 
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
 const secret = import.meta.env.VITE_SKYWAY_SECRET_KEY;
-
 const tokenString = GetToken(appId, secret);// トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
 const context = { ctx: null, room: null };// SkyWay context & room
 // refs / state
-const StreamArea = ref(null);
-const RoomCreated = ref(false);
-const RoomId = ref(null);
-const Joining = ref(false);
-const Joined = ref(false);
-const LocalMember = ref(null);
-const ErrorMessage = ref('');
-const RemoteVideos = ref([]); // 受信した remote streams 用
+const streamArea = ref(null); // StreamArea -> streamArea
+const roomCreated = ref(false); // RoomCreated -> roomCreated
+const roomId = ref(null); // RoomId -> roomId
+const joining = ref(false); // Joining -> joining
+const joined = ref(false); // Joined -> joined
+const localMember = ref(null); // LocalMember -> localMember
+const errorMessage = ref(''); // ErrorMessage -> errorMessage
+const remoteVideos = ref([]); // RemoteVideos -> remoteVideos
 // 退出時に解放するために保持（追加）
-const LocalVideoStream = ref(null);
-const LocalAudioStream = ref(null);
-const LocalVideoEl = ref(null);
-const Leaving = ref(false);// 退出中フラグ（追加：leave 完了前の再 join を防止）
+const localVideoStream = ref(null); // LocalVideoStream -> localVideoStream
+const localAudioStream = ref(null); // LocalAudioStream -> localAudioStream
+const localVideoEl = ref(null); // LocalVideoEl -> localVideoEl
+const leaving = ref(false); // Leaving -> leaving
 // ミュート状態管理（新規追加）
-const IsAudioMuted = ref(false);
-const IsVideoMuted = ref(false);
+const isAudioMuted = ref(false); // IsAudioMuted -> isAudioMuted
+const isVideoMuted = ref(false); // IsVideoMuted -> isVideoMuted
 // 画面共有状態管理（追加）
-const IsScreenSharing = ref(false); 
+const isScreenSharing = ref(false); // IsScreenSharing -> isScreenSharing
 const baseUrl = window.location.href.split('?')[0];
 // Publication を保持（publish の戻り値として得られるオブジェクト）
-const LocalVideoPublication = ref(null);
-const LocalAudioPublication = ref(null);
-const EnlargedVideo = ref(null);// 拡大表示用の状態管理（追加）
+const localVideoPublication = ref(null); // LocalVideoPublication -> localVideoPublication
+const localAudioPublication = ref(null); // LocalAudioPublication -> localAudioPublication
+const enlargedVideo = ref(null); // EnlargedVideo -> enlargedVideo
+// 追加: 重複 subscribe 防止用（publication.id を記録）
+const subscribedPublicationIds = new Set();
+// 追加: ルームイベントのハンドラ参照（退出時に解除するため）
+const roomEventHandlers = { onStreamPublished: null };
 
 // ヘルパ: SkyWay stream オブジェクトから MediaStreamTrack を取り出す
 const extractTrack = (stream, kind = 'video') => {
@@ -68,7 +70,7 @@ const getContext = async () => {
     });
     return context.ctx;
   } catch (e) {
-    toast.error('Context 作成失敗: ' + e);
+    toast.error('認証失敗: ' + e);
     console.error(e);
   }
 };
@@ -76,14 +78,14 @@ const getContext = async () => {
 // ルーム作成
 const createRoom = async () => {
   try {
-    if (!RoomId.value) {
-      RoomId.value = uuidV4();
+    if (!roomId.value) {
+      roomId.value = uuidV4();
     }
     context.room = await SkyWayRoom.FindOrCreate(context.ctx, {
       type: 'sfu',
-      name: RoomId.value
+      name: roomId.value
     });
-    RoomCreated.value = true;
+    roomCreated.value = true;
   } catch (e) {
     toast.error('Room 作成失敗: ' + e);
     console.error(e);
@@ -95,7 +97,7 @@ const createRoom = async () => {
 // attachRemoteStream関数でボタンに固有IDを設定
 const attachRemoteStream = (stream) => {
   try {
-    if (!StreamArea.value) return;
+    if (!streamArea.value) return;
 
     const hasVideo = !!(stream?.track?.kind === 'video' || (stream.mediaStream && stream.mediaStream.getVideoTracks?.().length));
     const hasAudio = !!(stream?.track?.kind === 'audio' || (stream.mediaStream && stream.mediaStream.getAudioTracks?.().length));
@@ -103,7 +105,7 @@ const attachRemoteStream = (stream) => {
     if (hasVideo) {
       const container = document.createElement('div');
       container.className = 'relative inline-block';
-      StreamArea.value.appendChild(container);
+      streamArea.value.appendChild(container);
 
       const el = document.createElement('video');
       el.autoplay = true;
@@ -145,16 +147,16 @@ const attachRemoteStream = (stream) => {
         };
       }
 
-      RemoteVideos.value.push(container);
+      remoteVideos.value.push(container);
     } else if (hasAudio) {
       const el = document.createElement('audio');
       el.autoplay = true;
       el.controls = false;
       el.style.display = 'none';
-      StreamArea.value.appendChild(el);
+      streamArea.value.appendChild(el);
       stream.attach(el);
       el.play?.().catch(() => {});
-      RemoteVideos.value.push(el);
+      remoteVideos.value.push(el);
     }
   } catch (err) {
     console.error('attachRemoteStream failed:', err);
@@ -208,12 +210,12 @@ const setStreamMutedFallback = (skywayStream, kind, muted) => {
 // 音声ミュート切り替え
 const toggleAudioMute = async () => {
   // まず Publication API を試す
-  let ok = await togglePublicationMute(LocalAudioPublication, IsAudioMuted);
+  let ok = await togglePublicationMute(localAudioPublication, isAudioMuted);
   if (!ok) {
     // フォールバック: track.enabled を切り替える
-    const newMuted = !IsAudioMuted.value;
-    const fOk = setStreamMutedFallback(LocalAudioStream.value, 'audio', newMuted);
-    if (fOk) IsAudioMuted.value = newMuted;
+    const newMuted = !isAudioMuted.value;
+    const fOk = setStreamMutedFallback(localAudioStream.value, 'audio', newMuted);
+    if (fOk) isAudioMuted.value = newMuted;
     ok = fOk;
   }
   if (!ok) console.warn('Audio mute/unmute failed (no publication & no track)');
@@ -222,44 +224,44 @@ const toggleAudioMute = async () => {
 // 映像ミュート切り替え（修正版）
 const toggleVideoMute = async () => {
   // まず Publication API を試す（togglePublicationMute は isMutedRef を更新する）
-  let ok = await togglePublicationMute(LocalVideoPublication, IsVideoMuted);
+  let ok = await togglePublicationMute(localVideoPublication, isVideoMuted);
 
   // Publication API が使えずフォールバックした場合はここでフラグを反転して更新する
   if (!ok) {
-    const newMuted = !IsVideoMuted.value;
-    const fOk = setStreamMutedFallback(LocalVideoStream.value, 'video', newMuted);
+    const newMuted = !isVideoMuted.value;
+    const fOk = setStreamMutedFallback(localVideoStream.value, 'video', newMuted);
     if (fOk) {
-      IsVideoMuted.value = newMuted;
+      isVideoMuted.value = newMuted;
       ok = true;
     }
   }
 
   // 最終的なフラグ IsVideoMuted.value を参照してローカルの見た目を更新（反転や ! を使わない）
-  if (LocalVideoEl.value) {
-    LocalVideoEl.value.style.filter = IsVideoMuted.value ? 'brightness(30%)' : 'none';
+  if (localVideoEl.value) {
+    localVideoEl.value.style.filter = isVideoMuted.value ? 'brightness(30%)' : 'none';
   }
 
   if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
 //画面共有
 const screenShare = async () => {
-  if (!LocalMember.value) return;
+  if (!localMember.value) return;
   
   try {
-    if (IsScreenSharing.value) {
+    if (isScreenSharing.value) {
       // 画面共有停止 - 元のカメラ映像に戻す
-      await LocalMember.value.unpublish(LocalVideoPublication.value);
+      await localMember.value.unpublish(localVideoPublication.value);
       // カメラ映像を再作成してpublish
       const cameraStream = await SkyWayStreamFactory.createCameraVideoStream();
-      LocalVideoStream.value = cameraStream;
-      LocalVideoPublication.value = await LocalMember.value.publish(cameraStream);
+      localVideoStream.value = cameraStream;
+      localVideoPublication.value = await localMember.value.publish(cameraStream);
       
       // ローカル映像要素を更新
-      if (LocalVideoEl.value) {
-        cameraStream.attach(LocalVideoEl.value);
+      if (localVideoEl.value) {
+        cameraStream.attach(localVideoEl.value);
       }
       
-      IsScreenSharing.value = false;
+      isScreenSharing.value = false;
     } else {
       // 画面共有開始
       const { video: screenStream } = await SkyWayStreamFactory.createDisplayStreams({
@@ -270,18 +272,18 @@ const screenShare = async () => {
       });
       
       // 現在の映像をunpublish
-      await LocalMember.value.unpublish(LocalVideoPublication.value);
+      await localMember.value.unpublish(localVideoPublication.value);
       
       // 画面共有をpublish
-      LocalVideoStream.value = screenStream;
-      LocalVideoPublication.value = await LocalMember.value.publish(screenStream);
+      localVideoStream.value = screenStream;
+      localVideoPublication.value = await localMember.value.publish(screenStream);
       
       // ローカル映像要素を更新
-      if (LocalVideoEl.value) {
-        screenStream.attach(LocalVideoEl.value);
+      if (localVideoEl.value) {
+        screenStream.attach(localVideoEl.value);
       }
       
-      IsScreenSharing.value = true;
+      isScreenSharing.value = true;
     }
   } catch (error) {
     console.error('画面共有エラー:', error);
@@ -290,9 +292,8 @@ const screenShare = async () => {
 };
 
 // 映像拡大機能
-// enlargeVideo関数
 const enlargeVideo = (videoEl) => {
-  if (EnlargedVideo.value) return;
+  if (enlargedVideo.value) return;
   
   videoEl.__originalClass = videoEl.className;
   videoEl.__originalParent = videoEl.parentNode;
@@ -315,14 +316,14 @@ const enlargeVideo = (videoEl) => {
   videoEl.onclick = shrinkVideo;
   
   videoEl.__closeBtn = closeBtn;
-  EnlargedVideo.value = videoEl;
+  enlargedVideo.value = videoEl;
 };
 
 // shrinkVideo関数を以下のように修正
 const shrinkVideo = () => {
-  if (!EnlargedVideo.value) return;
+  if (!enlargedVideo.value) return;
   
-  const videoEl = EnlargedVideo.value;
+  const videoEl = enlargedVideo.value;
   videoEl.className = videoEl.__originalClass;
   
   // 元の位置に正確に戻す
@@ -343,64 +344,85 @@ const shrinkVideo = () => {
   // 保存した参照をクリーンアップ
   delete videoEl.__originalNextSibling;
   
-  EnlargedVideo.value = null;
+  enlargedVideo.value = null;
 };
 
 // ESCキーで縮小（追加）
 const handleKeydown = (e) => {
-  if (e.key === 'Escape' && EnlargedVideo.value) {
+  if (e.key === 'Escape' && enlargedVideo.value) {
     shrinkVideo();
   }
 };
 
 // ルーム参加
+// ルーム参加
+// ルーム参加
 const joinRoom = async () => {
-  if (Joining.value || Joined.value || Leaving.value) return; // Leaving 中は不可（追加）
-  if (!RoomId.value) {
+  if (joining.value || joined.value || leaving.value) return; // Leaving 中は不可（追加）
+  if (!roomId.value) {
     toast.error('ルームIDが設定されていません');
     return;
   }
+  // DEBUG: 開始ログ
+  console.log('[JOIN] START', {
+    roomId: roomId.value,
+    roomCreated: roomCreated.value,
+    joined: joined.value,
+    joining: joining.value,
+    leaving: leaving.value
+  });
+
   try {
-    Joining.value = true;
+    joining.value = true;
 
     // まだルームが作成されていない場合は作る
-    if (!RoomCreated.value || !context.room) { // room を破棄するので null チェック追加
+    if (!roomCreated.value || !context.room) { // room を破棄するので null チェック追加
       await createRoom();
+      console.log('[JOIN] createRoom 完了', {
+        roomId: context.room?.id,
+        publications: context.room?.publications?.length
+      });
     }
 
     // join
     const member = await context.room.join({ name: uuidV4() });
-    LocalMember.value = member;
+    localMember.value = member;
+    console.log('[JOIN] joined', {
+      localMemberId: member.id,
+      roomMembers: context.room.members.map(m => m.id)
+    });
 
     // ローカルカメラ映像 (音声含めたければ別メソッドも可)
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
     // ローカルの映像・音声ストリームを作成して publish（重要）
     const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream();
-
     // 退出時に解放するため保持（追加）
-    LocalVideoStream.value = videoStream;
-    LocalAudioStream.value = audioStream;
+    localVideoStream.value = videoStream;
+    localAudioStream.value = audioStream;
 
-// publish と Publication を保持（戻り値を受け取る）
-const videoPub = await member.publish(videoStream);
-const audioPub = await member.publish(audioStream);
-LocalVideoPublication.value = videoPub;
-LocalAudioPublication.value = audioPub;
+    // publish と Publication を保持（戻り値を受け取る）
+    const videoPub = await member.publish(videoStream);
+    const audioPub = await member.publish(audioStream);
+    localVideoPublication.value = videoPub;
+    localAudioPublication.value = audioPub;
+    console.log('[JOIN] publish 完了', {
+      videoPubId: videoPub.id,
+      audioPubId: audioPub.id
+    });
 
-// デバッグ出力（Join 後に Console で確認しやすくする）
-console.log('LocalVideoPublication:', LocalVideoPublication.value);
-console.log('LocalAudioPublication:', LocalAudioPublication.value);
-// 開発時だけ window に展開して手動確認できるようにする（終了時に削除してOK）
-try {
-  window.__localVideoPublication = LocalVideoPublication.value;
-  window.__localAudioPublication = LocalAudioPublication.value;
-} catch (e) {}
+    // デバッグ出力（Join 後に Console で確認しやすくする）
+    console.log('LocalVideoPublication:', localVideoPublication.value);
+    console.log('LocalAudioPublication:', localAudioPublication.value);
+    try {
+      window.__localVideoPublication = localVideoPublication.value;
+      window.__localAudioPublication = localAudioPublication.value;
+    } catch (e) {}
 
     // ローカル video 要素
-       // ローカル映像用コンテナ（追加）
+    // ローカル映像用コンテナ（追加）
     const localContainer = document.createElement('div');
     localContainer.className = 'relative inline-block';
-    StreamArea.value.appendChild(localContainer);
+    streamArea.value.appendChild(localContainer);
 
     const localVideoEl = document.createElement('video');
     localVideoEl.muted = true;
@@ -419,93 +441,215 @@ try {
     // SkyWay の stream を video に接続
     videoStream.attach(localVideoEl);
     // 退出時に解放するため保持（追加）
-    LocalVideoEl.value = localVideoEl;
+    localVideoEl.value = localVideoEl;
+    console.log('[JOIN] ローカル video 要素 attach 完了');
+
+    // 追加: 既に公開済みの publication にも一度だけ subscribe（自分のは除外）
+    try {
+      const pubs = context.room.publications ?? [];
+      console.log('[JOIN] 既存 publication 数:', pubs.length);
+      for (const pub of pubs) {
+        if (pub.publisher.id === member.id) continue;
+        if (subscribedPublicationIds.has(pub.id)) continue;
+        const { stream } = await member.subscribe(pub.id);
+        subscribedPublicationIds.add(pub.id);
+        attachRemoteStream(stream);
+        console.log('[JOIN] 既存 pub subscribe', pub.id);
+      }
+    } catch (err) {
+      console.warn('subscribe existing pubs failed:', err);
+    }
 
     // 以後新規公開にもsubscribe（重要）
-    context.room.onStreamPublished.add(async (e) => {
-      if (e.publication.publisher.id === member.id) return;
+    // 追加: ハンドラを保持して退出時に解除、重複subscribe防止
+    roomEventHandlers.onStreamPublished = async (e) => {
+      // DEBUG: 発火ログ（publisher / localMember / pubId を全て表示）
+      console.log('[EVENT] onStreamPublished', {
+        pubId: e.publication.id,
+        publisherId: e.publication.publisher.id,
+        localMemberId: member.id,
+        isLocalById: e.publication.publisher.id === member.id
+      });
+
+      // NOTE: 自分の publication を確実に除外（ID / publisher 両面）
+      if (
+        e.publication.publisher.id === member.id ||
+        (localVideoPublication.value && e.publication.id === localVideoPublication.value.id) ||
+        (localAudioPublication.value && e.publication.id === localAudioPublication.value.id)
+      ) {
+        console.log('[EVENT] 自分の publication のため subscribe スキップ', e.publication.id);
+        return;
+      }
+
+      if (subscribedPublicationIds.has(e.publication.id)) {
+        console.log('[EVENT] duplicate skip', e.publication.id);
+        return;
+      }
       try {
         const { stream } = await member.subscribe(e.publication.id);
+        subscribedPublicationIds.add(e.publication.id);
+        console.log('[EVENT] 新規 pub subscribe', e.publication.id);
         attachRemoteStream(stream);
       } catch (err) {
         console.warn('subscribe new pub failed:', err);
       }
+    };
+    context.room.onStreamPublished.add(roomEventHandlers.onStreamPublished);
+    console.log('[JOIN] onStreamPublished ハンドラ登録');
+
+    joined.value = true;
+
+    console.log('[JOIN] SUCCESS 状態', {
+      Joined: joined.value,
+      LocalMemberId: localMember.value?.id,
+      RemoteVideoDomCount: remoteVideos.value.length,
+      subscribedPublicationIds: [...subscribedPublicationIds]
     });
-
-    // 参考: すでに用意済みのイベントハンドラを拡張したい場合はこれでもOK
-    // member.onPublicationSubscribed.add(({ stream }) => {
-    //   attachRemoteStream(stream);
-    // });
-
-    Joined.value = true;
   } catch (e) {
     toast.error('ルーム参加に失敗しました: ' + e);
     console.error(e);
   } finally {
-    Joining.value = false;
+    joining.value = false;
   }
 };
 
 // 退出（Leave）
 const leaveRoom = async () => {
-  if (Leaving.value) return; // 二重押下防止（追加）
-  Leaving.value = true;
+  if (leaving.value) return; // 二重押下防止（追加）
+  leaving.value = true;
+  // DEBUG: 開始時のメンバー一覧（取得できる範囲）
+  console.log('[LEAVE] START', {
+    Joined: joined.value,
+    LocalMemberId: localMember.value?.id,
+    roomMembersSnapshot: context.room?.members?.map(m => m.id)
+  });
   try {
-    // ルーム離脱（チャンネルに居るときのみ実行：ガード）
-    if (LocalMember.value?.leave && LocalMember.value.channel) {
-      await LocalMember.value.leave();
+    // まず leave を試す（先に leave することでゴーストメンバー化を防止）
+    let leaveSucceeded = false;
+    if (localMember.value?.leave) {
+      try {
+        await localMember.value.leave();
+        leaveSucceeded = true;
+        console.log('[LEAVE] member.leave() 完了');
+      } catch (err) {
+        console.warn('[LEAVE] member.leave() 失敗 -> フォールバックで unpublish', err);
+      }
+    } else {
+      console.log('[LEAVE] member.leave() 不可 (メソッドなし)');
     }
 
-    // ローカルメディアの解放
-    if (LocalVideoStream.value) {
+    // leave が失敗した場合のみ unpublish を試す（成功していれば不要）
+    if (!leaveSucceeded && localMember.value?.unpublish) {
       try {
-        LocalVideoStream.value.detach?.();
-        LocalVideoStream.value.track?.stop?.();
+        if (localVideoPublication.value) {
+          await localMember.value.unpublish(localVideoPublication.value);
+          console.log('[LEAVE][FB] unpublish video', localVideoPublication.value.id);
+        }
+        if (localAudioPublication.value) {
+          await localMember.value.unpublish(localAudioPublication.value);
+          console.log('[LEAVE][FB] unpublish audio', localAudioPublication.value.id);
+        }
+      } catch (e) {
+        console.warn('[LEAVE][FB] unpublish failed', e);
+      }
+    }
+
+    // 追加: 新規配信イベントのハンドラを解除（多重登録/二重subscribe防止）
+    if (context.room && roomEventHandlers.onStreamPublished && typeof context.room.onStreamPublished?.remove === 'function') {
+      try { 
+        context.room.onStreamPublished.remove(roomEventHandlers.onStreamPublished); 
+        console.log('[LEAVE] onStreamPublished ハンドラ解除');
+      } catch (e) {
+        console.warn('[LEAVE] handler remove failed', e);
+      }
+    }
+    roomEventHandlers.onStreamPublished = null;
+
+    // ローカルメディアの解放
+    if (localVideoStream.value) {
+      try {
+        localVideoStream.value.detach?.();
+        localVideoStream.value.track?.stop?.();
+        console.log('[LEAVE] local video track stopped');
       } catch {}
     }
-    if (LocalAudioStream.value) {
+    if (localAudioStream.value) {
       try {
-        LocalAudioStream.value.detach?.();
-        LocalAudioStream.value.track?.stop?.();
+        localAudioStream.value.detach?.();
+        localAudioStream.value.track?.stop?.();
+        console.log('[LEAVE] local audio track stopped');
       } catch {}
     }
 
     // ローカル要素の削除
-    if (LocalVideoEl.value && LocalVideoEl.value.parentNode) {
-      LocalVideoEl.value.pause?.();
-      LocalVideoEl.value.srcObject = null;
-      LocalVideoEl.value.parentNode.removeChild(LocalVideoEl.value);
+    if (localVideoEl.value && localVideoEl.value.parentNode) {
+      localVideoEl.value.pause?.();
+      localVideoEl.value.srcObject = null;
+      localVideoEl.value.parentNode.removeChild(localVideoEl.value);
+      console.log('[LEAVE] local video element removed');
     }
-    LocalVideoEl.value = null;
+    localVideoEl.value = null;
 
     // リモート要素の削除
-    for (const el of RemoteVideos.value) {
+    const removing = remoteVideos.value.length;
+    for (const el of remoteVideos.value) {
       try {
         el.pause?.();
         el.srcObject = null;
         el.remove();
       } catch {}
     }
-    RemoteVideos.value = [];
+    remoteVideos.value = [];
+    console.log('[LEAVE] remote elements removed', removing);
+
+    // 追加: 映像拡大中なら縮小してオーバーレイを除去
+    if (enlargedVideo.value) {
+      try { shrinkVideo(); console.log('[LEAVE] shrinkVideo 実行'); } catch {}
+    }
+
+    // 追加: 念のため表示領域を完全クリア（取りこぼし対策）
+    if (streamArea.value) {
+      try { streamArea.value.innerHTML = ''; console.log('[LEAVE] StreamArea cleared'); } catch {}
+    }
 
     // 状態初期化（RoomIdは残す＝再参加しやすくする）
-    Joined.value = false;
-    Joining.value = false;
-    LocalMember.value = null;
-    LocalVideoStream.value = null;
-    LocalAudioStream.value = null;
+    joined.value = false;
+    joining.value = false;
+    localMember.value = null;
+    localVideoStream.value = null;
+    localAudioStream.value = null;
 
     // ミュート状態初期化（新規追加）
-    IsAudioMuted.value = false;
-    IsVideoMuted.value = false;
+    isAudioMuted.value = false;
+    isVideoMuted.value = false;
+    isScreenSharing.value = false; // 追加: 画面共有の状態も戻す
+
+    // 追加: Publication 参照をリセット
+    localVideoPublication.value = null;
+    localAudioPublication.value = null;
+
+    // 追加: subscribe 済み publication の記録をクリア
+    subscribedPublicationIds.clear();
+    console.log('[LEAVE] subscribedPublicationIds cleared');
+
+    // NOTE: room インスタンスを null にする前に（デバッグ用に）メンバー確認
+    console.log('[LEAVE] room.members snapshot (before null)', context.room?.members?.map(m => m.id));
 
     // 重要: 同じ Room インスタンスでの再 join を避けるため破棄（追加）
-    RoomCreated.value = false;
+    roomCreated.value = false;
     context.room = null;
+
+    // DEBUG: 終了ログ
+    console.log('[LEAVE] END', {
+      Joined: joined.value,
+      LocalMember: localMember.value,
+      RoomCreated: roomCreated.value,
+      RemoteVideoDomCount: remoteVideos.value.length
+    });
   } catch (e) {
     console.error('leave failed:', e);
   } finally {
-    Leaving.value = false;
+    leaving.value = false;
   }
 };
 // onMounted: URL に room=xxx があれば利用
@@ -513,7 +657,7 @@ onMounted(async () => {
   await getContext();
   const qRoom = new URLSearchParams(window.location.search).get('room');
   if (qRoom) {
-    RoomId.value = qRoom;
+    roomId.value = qRoom;
   }
   // ESCキーリスナー追加
   document.addEventListener('keydown', handleKeydown);
@@ -529,7 +673,7 @@ onUnmounted(() => {
   <div class="p-4 space-y-6">
         <!-- 拡大表示中の縮小用オーバーレイ（追加） -->
     <div 
-      v-if="EnlargedVideo" 
+      v-if="enlargedVideo" 
       @click="shrinkVideo"
       class="fixed inset-0 bg-transparent z-40 cursor-pointer"
       title="クリックして元のサイズに戻す"
@@ -541,7 +685,7 @@ onUnmounted(() => {
       <!-- ボタンエリア -->
       <div class="space-x-2">
         <button
-          v-if="!RoomCreated"
+          v-if="!roomCreated"
           @click="createRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 active:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
         >
@@ -549,42 +693,42 @@ onUnmounted(() => {
         </button>
 
         <button
-          v-if="RoomId && !Joined"
-          :disabled="Joining || Leaving"  
+          v-if="roomId && !joined"
+          :disabled="joining || leaving"  
           @click="joinRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
         >
-          {{ Joining ? 'Joining...' : 'ルーム参加' }}
+          {{ joining ? 'Joining...' : 'ルーム参加' }}
         </button>
 
          <button
-          v-if="Joined"
-          :disabled="Leaving"            
+          v-if="joined"
+          :disabled="leaving"            
           @click="leaveRoom"
           class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
         >
-          {{ Leaving ? 'Leaving...' : 'ルーム退出' }}
+          {{ leaving ? 'Leaving...' : 'ルーム退出' }}
         </button>
       </div>
 
-      <div v-if="ErrorMessage" class="text-sm text-red-600 font-medium">
-        {{ ErrorMessage }}
+      <div v-if="errorMessage" class="text-sm text-red-600 font-medium">
+        {{ errorMessage }}
       </div>
     </div>
 
      <!-- ミュートボタン（新規追加） -->
-      <div v-if="Joined" class="space-x-2">
+      <div v-if="joined" class="space-x-2">
         <!-- 音声ミュートボタン -->
         <button
           @click="toggleAudioMute"
           :class="[
             'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            IsAudioMuted 
+            isAudioMuted 
               ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
               : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
           ]"
         >
-          {{ IsAudioMuted ? '🔇 ミュート中' : '🎤 音声ON' }}
+          {{ isAudioMuted ? '🔇 ミュート中' : '🎤 音声ON' }}
         </button>
 
         <!-- 映像ミュートボタン -->
@@ -592,41 +736,41 @@ onUnmounted(() => {
           @click="toggleVideoMute"
           :class="[
             'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            IsVideoMuted 
+            isVideoMuted 
               ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
               : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
           ]"
         >
-          {{ IsVideoMuted ? '📹 映像OFF' : '📹 映像ON' }}
+          {{ isVideoMuted ? '📹 映像OFF' : '📹 映像ON' }}
         </button>
         <!--画面共有ボタン-->
         <button
           @click="screenShare"
           :class="[
             'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            IsScreenSharing
+            isScreenSharing
               ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400'
               : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
           ]"
         >
-          {{ IsScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
+          {{ isScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
         </button>
       </div>
 
     <!-- ルーム情報表示 -->
-    <div v-if="RoomId" class="space-y-2 text-sm">
+    <div v-if="roomId" class="space-y-2 text-sm">
       <p>以下のURLを相手と共有:</p>
       <p class="break-all font-mono bg-gray-100 px-2 py-1 rounded">
-        {{ baseUrl }}?room={{ RoomId }}
+        {{ baseUrl }}?room={{ roomId }}
       </p>
       <p>またはルームID:</p>
-      <p class="font-mono bg-gray-100 px-2 py-1 inline-block rounded">{{ RoomId }}</p>
+      <p class="font-mono bg-gray-100 px-2 py-1 inline-block rounded">{{ roomId }}</p>
     </div>
 
     <!-- 映像表示エリア -->
     <div
-      ref="StreamArea"
-      v-if="RoomCreated"
+      ref="streamArea"
+      v-if="roomCreated"
       class="flex gap-4 flex-wrap border rounded p-3 min-h-[200px]"
     ></div>
 
