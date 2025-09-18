@@ -11,29 +11,29 @@ const secret = import.meta.env.VITE_SKYWAY_SECRET_KEY;
 const tokenString = GetToken(appId, secret);// トークン生成 (GetToken の実装が同期か非同期かで await 必要か確認)
 const context = { ctx: null, room: null };// SkyWay context & room
 // refs / state
-const streamArea = ref(null); // StreamArea -> streamArea
-const roomCreated = ref(false); // RoomCreated -> roomCreated
-const roomId = ref(null); // RoomId -> roomId
-const joining = ref(false); // Joining -> joining
-const joined = ref(false); // Joined -> joined
-const localMember = ref(null); // LocalMember -> localMember
-const errorMessage = ref(''); // ErrorMessage -> errorMessage
-const remoteVideos = ref([]); // RemoteVideos -> remoteVideos
+const streamArea = ref(null); 
+const roomCreated = ref(false);
+const roomId = ref(null);
+const joining = ref(false);
+const joined = ref(false);
+const localMember = ref(null);
+const errorMessage = ref(''); 
+const remoteVideos = ref([]); 
 // 退出時に解放するために保持（追加）
-const localVideoStream = ref(null); // LocalVideoStream -> localVideoStream
-const localAudioStream = ref(null); // LocalAudioStream -> localAudioStream
-const localVideoEl = ref(null); // LocalVideoEl -> localVideoEl
-const leaving = ref(false); // Leaving -> leaving
+const localVideoStream = ref(null); 
+const localAudioStream = ref(null); 
+const localVideoEl = ref(null); 
+const leaving = ref(false); 
 // ミュート状態管理（新規追加）
-const isAudioMuted = ref(false); // IsAudioMuted -> isAudioMuted
-const isVideoMuted = ref(false); // IsVideoMuted -> isVideoMuted
+const isAudioMuted = ref(false); 
+const isVideoMuted = ref(false); 
 // 画面共有状態管理（追加）
-const isScreenSharing = ref(false); // IsScreenSharing -> isScreenSharing
+const isScreenSharing = ref(false); 
 const baseUrl = window.location.href.split('?')[0];
 // Publication を保持（publish の戻り値として得られるオブジェクト）
-const localVideoPublication = ref(null); // LocalVideoPublication -> localVideoPublication
-const localAudioPublication = ref(null); // LocalAudioPublication -> localAudioPublication
-const enlargedVideo = ref(null); // EnlargedVideo -> enlargedVideo
+const localVideoPublication = ref(null); 
+const localAudioPublication = ref(null);
+const enlargedVideo = ref(null);
 // 追加: 重複 subscribe 防止用（publication.id を記録）
 const subscribedPublicationIds = new Set();
 // 追加: ルームイベントのハンドラ参照（退出時に解除するため）
@@ -95,7 +95,7 @@ const createRoom = async () => {
 // track の onmute/onunmute で動画の見た目（暗転）を制御
 // 受信ストリームをDOMへattach（映像/音声対応）
 // attachRemoteStream関数でボタンに固有IDを設定
-const attachRemoteStream = (stream) => {
+const attachRemoteStream = (stream, publication) => {
   try {
     if (!streamArea.value) return;
 
@@ -105,6 +105,13 @@ const attachRemoteStream = (stream) => {
     if (hasVideo) {
       const container = document.createElement('div');
       container.className = 'relative inline-block';
+
+    // 追加: publication id を保持（削除用に使う）映像の枠の削除の他
+    if (publication?.id) {
+    container.dataset.pubId = publication.id;
+     }
+
+
       streamArea.value.appendChild(container);
 
       const el = document.createElement('video');
@@ -148,6 +155,11 @@ const attachRemoteStream = (stream) => {
       }
 
       remoteVideos.value.push(container);
+      console.log('[REMOTE] created element', {
+        pubId: publication?.id,
+        publisherId: publication?.publisher?.id,
+        totalContainers: streamArea.value?.querySelectorAll('[data-pub-id]').length
+      });
     } else if (hasAudio) {
       const el = document.createElement('audio');
       el.autoplay = true;
@@ -161,7 +173,7 @@ const attachRemoteStream = (stream) => {
   } catch (err) {
     console.error('attachRemoteStream failed:', err);
   }
-};
+}
 
 // Publication.disable/enable を使ってミュートする関数（優先）
 const togglePublicationMute = async (pubRef, isMutedRef) => {
@@ -355,8 +367,6 @@ const handleKeydown = (e) => {
 };
 
 // ルーム参加
-// ルーム参加
-// ルーム参加
 const joinRoom = async () => {
   if (joining.value || joined.value || leaving.value) return; // Leaving 中は不可（追加）
   if (!roomId.value) {
@@ -453,7 +463,8 @@ const joinRoom = async () => {
         if (subscribedPublicationIds.has(pub.id)) continue;
         const { stream } = await member.subscribe(pub.id);
         subscribedPublicationIds.add(pub.id);
-        attachRemoteStream(stream);
+        // attachRemoteStream(stream);
+        attachRemoteStream(stream, pub);
         console.log('[JOIN] 既存 pub subscribe', pub.id);
       }
     } catch (err) {
@@ -489,14 +500,30 @@ const joinRoom = async () => {
         const { stream } = await member.subscribe(e.publication.id);
         subscribedPublicationIds.add(e.publication.id);
         console.log('[EVENT] 新規 pub subscribe', e.publication.id);
-        attachRemoteStream(stream);
+        // attachRemoteStream(stream);
+        attachRemoteStream(stream, e.publication);
       } catch (err) {
         console.warn('subscribe new pub failed:', err);
       }
     };
     context.room.onStreamPublished.add(roomEventHandlers.onStreamPublished);
     console.log('[JOIN] onStreamPublished ハンドラ登録');
-
+    // 最小追加: unpublish イベントで DOM を削除
+    context.room.onStreamUnpublished.add((e) => {
+    const pubId = e.publication.id;
+    const el = streamArea.value?.querySelector(`[data-pub-id="${pubId}"]`);
+    if (el) {
+      el.remove();
+      console.log('[EVENT] unpublish -> remove DOM', pubId);
+      // remoteVideos 配列からも取り除く（厳密さを保つ）
+      remoteVideos.value = remoteVideos.value.filter(v => v !== el);
+      // もし Set に記録しているなら削除（任意）
+      subscribedPublicationIds.delete(pubId);
+      console.log('[EVENT] removed remote element (unpublish)', pubId);
+    } else {
+      console.log('[EVENT] unpublish but no element found', pubId);
+    }
+  });
     joined.value = true;
 
     console.log('[JOIN] SUCCESS 状態', {
